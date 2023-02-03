@@ -28,9 +28,9 @@ message TransferData {
 }
 `;
 const main = async () => {
-  const mnemonic = process.env.mnemonic || "";
+  const mnemonic = process.env.MNEMONIC || "";
   var root = protobuf.parse(proto, { keepCase: true }).root;
-  const mpcAddress = "lskcjqwdg9ezqtnpyd3f866nu4pdspsrft3rx5y8d";
+  const mpcAddress = process.env.MPC_ADDRESS;
   const recipientAddress = "0xbac265B9e5758F325703bcc6C43F98C84e2F5aD9";
   // Obtain a message type
   var TransferDataMessage = root.lookupType("lisk.TransferData");
