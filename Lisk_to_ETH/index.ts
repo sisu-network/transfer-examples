@@ -1,9 +1,24 @@
-import { apiClient, cryptography, transactions } from "@liskhq/lisk-client";
+import { apiClient, cryptography, } from "@liskhq/lisk-client";
+
 import protobuf from "protobufjs";
 import * as dotenv from "dotenv";
 dotenv.config();
+import axios from 'axios';
 
-const RPC_ENDPOINT = "ws://localhost:8080/ws";
+// const RPC_ENDPOINT = "wss://testnet-service.lisk.com/rpc-v2";
+const RPC_ENDPOINT = "wss://service.lisk.com/rpc-v2";
+const HTTP_ENDPOINT = "https://testnet-service.lisk.com/api/v2/";
+
+const networkIdTestnet = '15f0dacc1060e91818224a94286b13aa04279c640bd5d6f193182031d133df7c';
+const networkIdentifier = Buffer.from(networkIdTestnet, 'hex');
+
+const mpcAddress = process.env.MPC_ADDRESS!;
+const passphrase = process.env.MNEMONIC!;
+
+const instance = axios.create({
+  baseURL: HTTP_ENDPOINT,
+  timeout: 2000,
+});
 
 let clientCache: any;
 
@@ -26,54 +41,107 @@ message TransferData {
   optional string token = 3;
   required uint64 amount = 4;
 }
+
+message AssetMessage {
+  required uint64 amount = 1;
+  required bytes recipientAddress = 2;
+  required string data = 3;
+}
+
+message TransactionMessage {
+  required uint32 moduleID = 1;
+  required uint32 assetID = 2;
+  required uint64 nonce = 3;
+  required uint64 fee = 4;
+  required bytes senderPublicKey = 5;
+  required bytes asset = 6;
+  repeated bytes signatures = 7;
+}
 `;
-const main = async () => {
-  const mnemonic = process.env.MNEMONIC || "";
-  var root = protobuf.parse(proto, { keepCase: true }).root;
-  const mpcAddress = process.env.MPC_ADDRESS;
-  const recipientAddress = "0xbac265B9e5758F325703bcc6C43F98C84e2F5aD9";
-  // Obtain a message type
-  var TransferDataMessage = root.lookupType("lisk.TransferData");
-  // Exemplary payload
+
+const getPayloadBuffer = (chainId: Number, amount: Number, recipient: String): Buffer =>  {
   var payload = {
-    chainId: 1,
+    chainId: chainId,
     recipient: Uint8Array.from(
-      Buffer.from(recipientAddress.substring(2, recipientAddress.length), "hex")
+      Buffer.from(recipient.substring(2, recipient.length), "hex")
     ),
-    amount: 123124238962348765,
+    amount: amount,
   };
 
-  // Verify the payload if necessary (i.e. when possibly incomplete or invalid)
-  var errMsg = TransferDataMessage.verify(payload);
-  if (errMsg) throw Error(errMsg);
+  var root = protobuf.parse(proto, { keepCase: true }).root;
+  var TransferData = root.lookupType("lisk.TransferData");
+  var payloadMessage = TransferData.encode(TransferData.create(payload)).finish();
 
-  // Create a new message
-  var message = TransferDataMessage.create(payload);
+  return Buffer.from(payloadMessage);
+}
 
-  // Encode a message to an Uint8Array (browser) or Buffer (node)
-  var buffer = TransferDataMessage.encode(message).finish();
-  const client = await getClient();
-  const address = cryptography.getAddressFromBase32Address(mpcAddress);
-  const tx = await client.transaction.create(
-    {
-      moduleID: 2,
-      assetID: 0,
-      fee: BigInt(transactions.convertLSKToBeddows("0.05")),
-      asset: {
-        amount: BigInt(transactions.convertLSKToBeddows("0.1")),
-        recipientAddress: address,
-        data: (buffer as Buffer).toString("base64"),
-      },
-    },
-    mnemonic
-  );
+const getAsset = (amount: Number, recipientAddress: Buffer, payload: Buffer): Buffer => {
+
+  const transferAsset = {
+    amount: amount,
+    recipientAddress,
+    data: payload.toString('base64'),
+  };
+
+  var root = protobuf.parse(proto, { keepCase: true }).root;
+  var AssetMessage = root.lookupType("lisk.AssetMessage");
+  var assetMessage = AssetMessage.encode(AssetMessage.create(transferAsset)).finish();
+
+  return Buffer.from(assetMessage);
+}
+
+const transferLisk = async (chainId: Number, amount: Number, recipient: String) => {
+  const address  = cryptography.getBase32AddressFromPassphrase(passphrase);
+  const {  publicKey } = cryptography.getAddressAndPublicKeyFromPassphrase(passphrase);
+
+  console.log(address);
+  const info = await instance.get(`/accounts?address=${address}`)
+  const { data :  [ { sequence: { nonce } } ] } = info.data;
+  console.log("nonce = ", nonce);
+
+  const recipientAddress = cryptography.getAddressFromBase32Address(mpcAddress);
+  const payload = getPayloadBuffer(chainId, amount, recipient);
+
+  // Transaction
+  var unsignedTransaction = {
+    moduleID: Number(2),
+    assetID: Number(0), // aka Token Transfer transaction
+    fee: Number(500000),
+    nonce: Number(nonce),
+    senderPublicKey: publicKey,
+    asset: getAsset(amount, recipientAddress, payload),
+    signatures: Array(),
+  };
+
+
+  var root = protobuf.parse(proto, { keepCase: true }).root;
+  var TransactionMessage = root.lookupType("lisk.TransactionMessage");
+  var transactionMessage = TransactionMessage.encode(TransactionMessage.create(unsignedTransaction)).finish();
+  var transactionBuffer = Buffer.from(transactionMessage);
+
+  const transactionWithNetworkIdentifierBytes = Buffer.concat([
+    networkIdentifier,
+    transactionBuffer,
+  ]);
+
+  var signature = cryptography.signData(transactionWithNetworkIdentifierBytes, passphrase);
+  unsignedTransaction.signatures.push(signature);
+  var transactionMessage = TransactionMessage.encode(TransactionMessage.create(unsignedTransaction)).finish();
+  var transactionBuffer = Buffer.from(transactionMessage);
 
   try {
-    const res = await client.transaction.send(tx);
-    console.log("rest = ", res);
+    var response = await instance.post('/transactions', {
+      transaction: transactionBuffer.toString('hex'),
+    })
+    console.log("response = ", response.data);
   } catch (error) {
     console.log("error = ", error);
   }
+}
+
+const main = async () => {
+  // 43113 is avax testnet
+  await transferLisk(43113, Number(100000000), "0xbac265B9e5758F325703bcc6C43F98C84e2F5aD9");
 };
 
 (async () => {
